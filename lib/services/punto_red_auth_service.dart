@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xml/xml.dart';
+import 'package:flutter/foundation.dart' show kIsWeb; // ⚡ IMPORTANTE
 
 import '../helpers/aes_helper.dart';
 
@@ -26,7 +27,6 @@ class PuntoRedAuthService {
     return AesHelper.encrypt(jsonEncode(payload), iv: iv, key: secretKey);
   }
 
-  // Obtiene el token del día, o genera uno nuevo si es otro día
   static Future<String> obtenerJwt() async {
     final prefs = await SharedPreferences.getInstance();
     final guardado = prefs.getString(_prefJwt);
@@ -34,28 +34,37 @@ class PuntoRedAuthService {
     final hoy = DateTime.now().toIso8601String().substring(0, 10);
 
     if (guardado != null && fecha == hoy) {
-      print('🔑 JWT desde caché (día $hoy)');
       return guardado;
     }
 
-    print('🔑 Solicitando JWT nuevo (toca renovar)...');
     return await forzarNuevoToken();
   }
 
-  // Fuerza la creación de un token nuevo (ignora el caché)
   static Future<String> forzarNuevoToken() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_prefJwt);
     await prefs.remove(_prefJwtFecha);
 
+    // ⚡ SI ES WEB, SALTAMOS LA PETICIÓN POR EL BLOQUEO DE CORS
+    if (kIsWeb) {
+      print(
+        '🌐 Modo Web detectado: Generando Token local por bloqueo de CORS...',
+      );
+      const dummyToken =
+          'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy.token.para.web';
+      final hoy = DateTime.now().toIso8601String().substring(0, 10);
+      await prefs.setString(_prefJwt, dummyToken);
+      await prefs.setString(_prefJwtFecha, hoy);
+      return dummyToken;
+    }
+
+    // FLUJO NORMAL PARA MÓVIL
     final url = Uri.parse(
       '$server/$authEndpoint'
       '?idDistribuidor=$idDistribuidor'
       '&codigoDispositivo=$codigoDispositivo'
       '&password=$password',
     );
-
-    print('🌐 POST $url');
 
     final resp = await http.post(
       url,
@@ -64,9 +73,6 @@ class PuntoRedAuthService {
         'Accept': 'application/xml, text/xml, application/json',
       },
     );
-
-    print('📥 Status: ${resp.statusCode}');
-    print('📥 Body: ${resp.body}');
 
     if (resp.statusCode != 200) {
       throw Exception('Error HTTP ${resp.statusCode} al generar token');
