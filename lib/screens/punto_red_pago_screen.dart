@@ -1,13 +1,15 @@
+// Pantalla de pago Punto Red que se adapta a Recargas o Pagos de Servicio.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:url_launcher/url_launcher.dart'; // ⚡ IMPORTANTE
 
 import '../models/punto_red_producto.dart';
 import '../services/punto_red_pago_service.dart';
-import '../services/punto_red_auth_service.dart';
 import '../services/paypal_service.dart';
 import '../theme/app_theme.dart';
 import 'punto_red_ticket_screen.dart';
-import 'paypal_checkout_screen.dart';
+import 'paypal_checkout_screen.dart'; // Solo se usará en móvil
 
 class PuntoRedPagoScreen extends StatefulWidget {
   final PuntoRedProducto producto;
@@ -31,6 +33,10 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
   bool _procesando = false;
   String? _error;
 
+  // ⚡ Variables para el flujo de web
+  String? _ordenPendienteWeb;
+  double? _saldoParaTicket;
+
   static const Color _morado = Color(0xFF9575CD);
   static const Color _moradoOscuro = Color(0xFF7451A8);
   static const Color _fondo = Color(0xFFF8F7FC);
@@ -49,31 +55,7 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
         prod.contains('recarga');
   }
 
-  // ⚡ Botón para forzar el token de 24 hrs
-  Future<void> _renovarToken() async {
-    setState(() => _procesando = true);
-    try {
-      await PuntoRedAuthService.forzarNuevoToken();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Token generado exitosamente por 24 hrs'),
-          backgroundColor: Colors.green,
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('❌ Error al generar token: $e'),
-          backgroundColor: Colors.red,
-        ),
-      );
-    } finally {
-      if (mounted) setState(() => _procesando = false);
-    }
-  }
-
+  // ⚡ NUEVO MÉTODO: Maneja la lógica de pago
   Future<void> _pagar() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() {
@@ -92,7 +74,7 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
           'Saldo insuficiente en PayPal (\$${saldo.toStringAsFixed(2)}).',
         );
 
-      // 2. Crear Orden y Capturar
+      // 2. Crear Orden
       final orden = await PayPalService.crearOrden(
         monto: widget.producto.precio,
         descripcion: 'Recarga Punto Red: ${widget.producto.producto}',
@@ -101,26 +83,123 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
       if (orden == null)
         throw Exception('No se pudo generar la orden en PayPal.');
 
-      final aprobado = await Navigator.push<bool>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PayPalCheckoutScreen(
-            approvalUrl: orden['approvalUrl']!,
-            orderId: orden['orderId']!,
+      final orderId = orden['orderId']!;
+      final approvalUrl = orden['approvalUrl']!;
+
+      // 3. FLUJO SEGÚN LA PLATAFORMA
+      if (kIsWeb) {
+        // ⚡ EN WEB: Abrimos PayPal en una nueva pestaña y esperamos que el usuario regrese
+        setState(() {
+          _procesando = false;
+          _ordenPendienteWeb = orderId;
+          _saldoParaTicket = saldo - widget.producto.precio;
+        });
+
+        final uri = Uri.parse(approvalUrl);
+        if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+          throw Exception('No se pudo abrir la página de PayPal.');
+        }
+
+        // Mostramos un diálogo para que el usuario confirme al volver
+        _mostrarDialogoConfirmacionWeb();
+        return;
+      } else {
+        // ⚡ EN MÓVIL: Usamos el WebView normal
+        final aprobado = await Navigator.push<bool>(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PayPalCheckoutScreen(
+              approvalUrl: approvalUrl,
+              orderId: orderId,
+            ),
           ),
+        );
+        if (!mounted) return;
+        if (aprobado != true) throw Exception('Pago cancelado en PayPal.');
+
+        final capturado = await PayPalService.capturarOrden(orderId);
+        if (!mounted) return;
+        if (!capturado) throw Exception('No se pudo cobrar en PayPal.');
+
+        // Descontar saldo localmente
+        PayPalService.descontarSaldoLocal(widget.producto.precio);
+
+        // Mandar a Punto Red
+        final tx = await PuntoRedPagoService.sendTx(
+          producto: widget.producto,
+          identificador: _identificadorCtrl.text.trim(),
+          usuarioId: widget.usuarioId,
+          usuarioCorreo: widget.usuarioCorreo,
+        );
+        if (!mounted) return;
+
+        // Mostrar Ticket
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => PuntoRedTicketScreen(
+              tx: tx,
+              servicio: widget.producto.servicio,
+              producto: widget.producto.producto,
+              telefono: _identificadorCtrl.text.trim(),
+              saldoPayPal: (saldo - widget.producto.precio),
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString().replaceFirst('Exception: ', '');
+        _procesando = false;
+      });
+    }
+  }
+
+  // ⚡ Diálogo para web: el usuario confirma que ya pagó en la otra pestaña
+  void _mostrarDialogoConfirmacionWeb() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('Pago en PayPal'),
+        content: const Text(
+          'Hemos abierto una nueva pestaña para que completes el pago.\n\nUna vez que hayas terminado, regresa a esta ventana y presiona "Ya completé el pago".',
         ),
-      );
-      if (!mounted) return;
-      if (aprobado != true) throw Exception('Pago cancelado en PayPal.');
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() => _ordenPendienteWeb = null); // Cancelar
+            },
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await _capturarPagoWeb();
+            },
+            child: const Text('Ya completé el pago'),
+          ),
+        ],
+      ),
+    );
+  }
 
-      final capturado = await PayPalService.capturarOrden(orden['orderId']!);
-      if (!mounted) return;
-      if (!capturado) throw Exception('No se pudo cobrar en PayPal.');
+  // ⚡ Captura la orden en web después de que el usuario confirma
+  Future<void> _capturarPagoWeb() async {
+    if (_ordenPendienteWeb == null) return;
+    setState(() => _procesando = true);
 
-      // 3. Descontar saldo
+    try {
+      final capturado = await PayPalService.capturarOrden(_ordenPendienteWeb!);
+      if (!capturado)
+        throw Exception('El pago no se completó en PayPal o fue cancelado.');
+
+      // Descontar saldo localmente
       PayPalService.descontarSaldoLocal(widget.producto.precio);
 
-      // 4. Mandar a Punto Red (Petición REAL con token de 24 hrs)
+      // Mandar a Punto Red (usando los IDs estáticos para que funcione en Sandbox)
       final tx = await PuntoRedPagoService.sendTx(
         producto: widget.producto,
         identificador: _identificadorCtrl.text.trim(),
@@ -129,7 +208,7 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
       );
       if (!mounted) return;
 
-      // 5. Mostrar Ticket
+      // Mostrar Ticket
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -138,7 +217,7 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
             servicio: widget.producto.servicio,
             producto: widget.producto.producto,
             telefono: _identificadorCtrl.text.trim(),
-            saldoPayPal: (saldo - widget.producto.precio),
+            saldoPayPal: _saldoParaTicket,
           ),
         ),
       );
@@ -147,6 +226,7 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
       setState(() {
         _error = e.toString().replaceFirst('Exception: ', '');
         _procesando = false;
+        _ordenPendienteWeb = null;
       });
     }
   }
@@ -168,13 +248,6 @@ class _PuntoRedPagoScreenState extends State<PuntoRedPagoScreen> {
           ),
         ),
         centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.vpn_key, color: _moradoOscuro),
-            tooltip: 'Generar nuevo token (24h)',
-            onPressed: _procesando ? null : _renovarToken,
-          ),
-        ],
       ),
       body: SafeArea(
         child: SingleChildScrollView(

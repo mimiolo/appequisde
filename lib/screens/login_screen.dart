@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart'
+    show kIsWeb; // ⚡ IMPORTANTE PARA LA WEB
 
 import '../helpers/biometric_helper.dart';
 import '../services/auth_service.dart';
@@ -57,13 +59,11 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  // ⚡ Verifica si es el admin de prueba (no requiere OTP)
   bool _esAdminDePrueba(String correo) {
     final c = correo.trim().toLowerCase();
     return c.endsWith('@test.com') || c == 'admin@test.com';
   }
 
-  // LOGIN NORMAL
   Future<void> _login() async {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _cargando = true);
@@ -78,7 +78,7 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    // ⚡ Si es admin de prueba (@test.com), OMITO el OTP y entro directo
+    // ⚡ SI ES ADMIN DE PRUEBA, ENTRA DIRECTO (SIN OTP)
     if (_esAdminDePrueba(user.correo)) {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('ultimoCorreo', user.correo);
@@ -98,7 +98,60 @@ class _LoginScreenState extends State<LoginScreen> {
       return;
     }
 
-    // ⚡ Para correos reales, SÍ envía OTP
+    // ⚡ LÓGICA PARA WEB: GENERAR OTP Y MOSTRARLO EN PANTALLA
+    if (kIsWeb) {
+      try {
+        final otpService = OtpService();
+        final codigo = otpService.generarCodigo();
+        await otpService.guardar(user.id!, codigo, 'login');
+
+        if (!mounted) return;
+        setState(() => _cargando = false);
+
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.security, color: AppColores.primary),
+                SizedBox(width: 8),
+                Text('Código 2FA (Modo Web)'),
+              ],
+            ),
+            content: Text(
+              'Por seguridad, los navegadores bloquean el envío de correos.\n\nTu código de verificación es:\n\n$codigo',
+              style: const TextStyle(fontSize: 16),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.pushReplacement(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => VerificarOtpScreen(usuario: user),
+                    ),
+                  );
+                },
+                child: const Text('Ir a verificar'),
+              ),
+            ],
+          ),
+        );
+        return;
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _cargando = false);
+        _snack('Error al generar código: $e', Colors.red);
+        return;
+      }
+    }
+
+    // ⚡ LÓGICA PARA MÓVIL (ANDROID/IOS): ENVÍA CORREO REAL
     try {
       await OtpService().enviarOtp(
         usuarioId: user.id!,
@@ -133,7 +186,6 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  // LOGIN BIOMÉTRICO → omite OTP siempre
   Future<void> _loginConBiometria() async {
     final ok = await BiometricHelper.autenticar(
       razon: 'Autentícate para iniciar sesión',
