@@ -26,6 +26,7 @@ dependencies:
   encrypt: ^5.0.3
   sqflite_common_ffi_web: ^0.4.3+1
   webview_flutter_web: ^0.2.3+4
+  qr_flutter: ^4.1.0
 
 dev_dependencies:
   flutter_test:

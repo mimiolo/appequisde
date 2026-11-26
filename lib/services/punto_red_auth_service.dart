@@ -3,13 +3,17 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xml/xml.dart';
-import 'package:flutter/foundation.dart' show kIsWeb; // ⚡ IMPORTANTE
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import '../helpers/aes_helper.dart';
 
 class PuntoRedAuthService {
   static const String server = 'https://gestopago.portalventas.net';
   static const String authEndpoint = 'sistema/app/jwt-gp/authenticate/';
+
+  // ⚡ TU URL DE RAILWAY
+  static const String railwayUrl =
+      'https://backend-puntored-production.up.railway.app';
 
   static const String idDistribuidor = '83';
   static const String codigoDispositivo = 'GPS83-TPV-17';
@@ -34,9 +38,11 @@ class PuntoRedAuthService {
     final hoy = DateTime.now().toIso8601String().substring(0, 10);
 
     if (guardado != null && fecha == hoy) {
+      print('🔑 JWT desde caché (día $hoy)');
       return guardado;
     }
 
+    print('🔑 Solicitando JWT nuevo...');
     return await forzarNuevoToken();
   }
 
@@ -45,11 +51,24 @@ class PuntoRedAuthService {
     await prefs.remove(_prefJwt);
     await prefs.remove(_prefJwtFecha);
 
-    // ⚡ SI ES WEB, SALTAMOS LA PETICIÓN POR EL BLOQUEO DE CORS
+    // ⚡ SI ES WEB, USAMOS RAILWAY PARA EVITAR EL ERROR CORS
     if (kIsWeb) {
-      print(
-        '🌐 Modo Web detectado: Generando Token local por bloqueo de CORS...',
-      );
+      try {
+        final resp = await http.post(Uri.parse('$railwayUrl/api/auth/token'));
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body);
+          final jwt = data['token'];
+
+          final hoy = DateTime.now().toIso8601String().substring(0, 10);
+          await prefs.setString(_prefJwt, jwt);
+          await prefs.setString(_prefJwtFecha, hoy);
+          return jwt;
+        }
+      } catch (e) {
+        print('⚠️ Error al pedir token a Railway: $e');
+      }
+
+      // Si Railway falla, devolvemos un token dummy para que no se rompa la UI
       const dummyToken =
           'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.dummy.token.para.web';
       final hoy = DateTime.now().toIso8601String().substring(0, 10);
